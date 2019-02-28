@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/net/publicsuffix"
 )
 
 // Version of the service
@@ -22,7 +23,7 @@ var jstorURL string
 var jstorProject string
 var jstorEmail string
 var jstorPass string
-var cookies cookiejar.Jar
+var loginCookies []*http.Cookie
 
 // aries is the structure of the response returned by /api/aries/:id
 type aries struct {
@@ -48,7 +49,18 @@ func versionHandler(c *gin.Context) {
 
 // healthCheckHandler reports the health of the serivce
 func healthCheckHandler(c *gin.Context) {
-	c.String(http.StatusOK, "Aries JSTOR is alive")
+	hcMap := make(map[string]string)
+	hcMap["AriesJSTOR"] = "true"
+	// ping the api with a minimal request to see if it is alive
+	url := fmt.Sprintf("%s/projects/%s/assets?with_meta=false&start=0&limit=0", jstorURL, jstorProject)
+	_, err := getAPIResponse(url)
+	if err != nil {
+		log.Printf("HealthCheck JSTOR ping failed: %s", err.Error())
+		hcMap["JSTOR"] = "false"
+	} else {
+		hcMap["JSTOR"] = "true"
+	}
+	c.JSON(http.StatusOK, hcMap)
 }
 
 /// ariesPing handles requests to the aries endpoint with no params.
@@ -65,15 +77,20 @@ func ariesLookup(c *gin.Context) {
 }
 
 // getAPIResponse is a helper used to call a JSON endpoint and return the resoponse as a string
-func getAPIResponse(url string) (string, error) {
-	log.Printf("Get resonse for: %s", url)
+func getAPIResponse(tgtURL string) (string, error) {
+	log.Printf("Get resonse for: %s", tgtURL)
+	apiReq, _ := http.NewRequest("GET", tgtURL, nil)
+	for _, cookie := range loginCookies {
+		apiReq.AddCookie(cookie)
+	}
 	timeout := time.Duration(10 * time.Second)
 	client := http.Client{
 		Timeout: timeout,
 	}
-	resp, err := client.Get(url)
+
+	resp, err := client.Do(apiReq)
 	if err != nil {
-		log.Printf("Unable to GET %s: %s", url, err.Error())
+		log.Printf("Unable to GET %s: %s", tgtURL, err.Error())
 		return "", err
 	}
 
@@ -88,19 +105,25 @@ func getAPIResponse(url string) (string, error) {
 
 func jstorLogin() error {
 	log.Printf("Logging into JSTOR...")
-	cookies, _ := cookiejar.New(nil)
+	// add a cookie jar to the login POST to retrieve login cookies
+	cookieJar, _ := cookiejar.New(&cookiejar.Options{PublicSuffixList: publicsuffix.List})
 	timeout := time.Duration(10 * time.Second)
 	client := http.Client{
 		Timeout: timeout,
-		Jar:     cookies,
+		Jar:     cookieJar,
 	}
 	values := url.Values{}
 	values.Set("email", jstorEmail)
 	values.Add("password", jstorPass)
-	_, err := client.PostForm(fmt.Sprintf("%s/account", jstorURL), values)
+	reqURL := fmt.Sprintf("%s/account", jstorURL)
+	loginResp, err := client.PostForm(reqURL, values)
 	if err != nil {
 		return err
 	}
+
+	// copy all of the cookies in the jar for future use
+	loginCookies = loginResp.Cookies()
+
 	log.Printf("Login successful")
 	return nil
 }
@@ -116,7 +139,7 @@ func main() {
 	var port int
 	flag.IntVar(&port, "port", 8080, "Aries JSTOR port (default 8080)")
 	flag.StringVar(&jstorURL, "url", "https://forum.jstor.org'", "JSTOR base URL")
-	flag.StringVar(&jstorEmail, "project", "", "Target JSTOR project")
+	flag.StringVar(&jstorProject, "project", "", "Target JSTOR project")
 	flag.StringVar(&jstorEmail, "email", "", "JSTOR authorized user email")
 	flag.StringVar(&jstorPass, "pass", "", "JSTOR authorized user passsword")
 	flag.Parse()
