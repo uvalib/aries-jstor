@@ -91,7 +91,7 @@ func ariesLookup(c *gin.Context) {
 	idF := map[string]string{"type": "numeric", "comparison": "eq",
 		"value": passedID, "field": "id", "fieldName": "SSID"}
 	ifnF := map[string]string{"type": "string", "field": "filename", "fieldName": "Filename",
-		"value": fmt.Sprintf("%s.*", passedID)}
+		"value": fmt.Sprintf("%s*", passedID)}
 	filterTerms = append(filterTerms, mapToEncodedString(idF))
 	filterTerms = append(filterTerms, mapToEncodedString(ifnF))
 
