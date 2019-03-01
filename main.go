@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
-	"strings"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -31,8 +31,7 @@ var loginCookies []*http.Cookie
 type aries struct {
 	Identifiers []string     `json:"identifier,omitempty"`
 	ServiceURL  []serviceURL `json:"service_url,omitempty"`
-	AccessURL   []string     `json:"access_url,omitempty"`
-	MetadataURL []string     `json:"metadata_url,omitempty"`
+	AdminURL    []string     `json:"administrative_url,omitempty"`
 }
 
 type serviceURL struct {
@@ -45,8 +44,13 @@ type jstorResp struct {
 	Assets []jstorAsset `json:"assets,omitempty"`
 }
 type jstorAsset struct {
-	ID       int    `json:"id,omitempty"`
-	Filename string `json:"filename,omitempty"`
+	ID               int    `json:"id,omitempty"`
+	Filename         string `json:"filename,omitempty"`
+	RepresentationID string `json:"representation_id,omitempty"`
+}
+type jstorResource struct {
+	URL  string `json:"url,omitempty"`
+	IIIF string `json:"iiif_url,omitempty"`
 }
 
 // favHandler is a dummy handler to silence browser API requests that look for /favicon.ico
@@ -64,7 +68,7 @@ func healthCheckHandler(c *gin.Context) {
 	hcMap["AriesJSTOR"] = "true"
 	// ping the api with a minimal request to see if it is alive
 	url := fmt.Sprintf("%s/projects/%s/assets?with_meta=false&start=0&limit=0", jstorURL, jstorProject)
-	_, err := getAPIResponse(url)
+	_, err := getAPIResponse(url, true)
 	if err != nil {
 		log.Printf("HealthCheck JSTOR ping failed: %s", err.Error())
 		hcMap["JSTOR"] = "false"
@@ -81,41 +85,75 @@ func ariesPing(c *gin.Context) {
 
 // ariesLookup will query APTrust for information on the supplied identifer
 func ariesLookup(c *gin.Context) {
+	// create filters to search by ID and filename
 	passedID := c.Param("id")
-
-	// fiter=[%7B%22comparison%22:%22eq%22,%22field%22:%22id%22,%22fielfName%22:%22SSID%22,,%22value%22:%222jhwevods%22%7]
-	// filter=[%7B%22type%22:%22numeric%22,%22comparison%22:%22eq%22,%22value%22:%2223760225%22,%22field%22:%22id%22,%22fieldName%22:%22SSID%22%7D]
-	// filter is like this:
-	// [ {"type":"numeric","comparison":"eq","value":"23760225","field":"id","fieldName":"SSID"},
-	//   {"field":"filename","fieldName":"Filename","type":"string","value":"20150110ARCH_0004*"} ]
 	var filterTerms []string
-	ftMap := make(map[string]string)
-	ftMap["type"] = "numeric"
-	ftMap["comparison"] = "eq"
-	ftMap["value"] = passedID
-	ftMap["field"] = "id"
-	ftMap["fieldName"] = "SSID"
-	ft, _ := json.Marshal(ftMap)
-	t := &url.URL{Path: string(ft)}
-	encoded := t.String()
-	filterTerms = append(filterTerms, encoded[2:len(encoded)])
-	qp := "with_meta=false&start=0&limit=1&sort=id&dir=DESC&filter="
-	fp := strings.Join(filterTerms, ",")
-	URL := fmt.Sprintf("%s/projects/%s/assets?%s[%s]", jstorURL, jstorProject, qp, fp)
-	resp, err := getAPIResponse(URL)
-	if err != nil {
-		log.Printf("Query Failed: %s", err.Error())
-		c.String(http.StatusNotFound, "%s was not found", passedID)
-		return
-	}
-	log.Printf("RESP: %s", resp)
+	idF := map[string]string{"type": "numeric", "comparison": "eq",
+		"value": passedID, "field": "id", "fieldName": "SSID"}
+	ifnF := map[string]string{"type": "string", "field": "filename", "fieldName": "Filename",
+		"value": fmt.Sprintf("%s.*", passedID)}
+	filterTerms = append(filterTerms, mapToEncodedString(idF))
+	filterTerms = append(filterTerms, mapToEncodedString(ifnF))
 
-	c.String(http.StatusNotImplemented, "Find %s not implemented", passedID)
+	var out aries
+	hits := 0
+	for _, filter := range filterTerms {
+		qp := "with_meta=false&start=0&limit=1&sort=id&dir=DESC&filter="
+		URL := fmt.Sprintf("%s/projects/%s/assets?%s[%s]", jstorURL, jstorProject, qp, filter)
+		respStr, err := getAPIResponse(URL, true)
+		if err != nil {
+			unescaped, _ := url.QueryUnescape(filter)
+			log.Printf("Query filter %s Failed: %s", unescaped, err.Error())
+			continue
+		}
+		log.Printf("Parsing JSTOR response for %s", passedID)
+		var resp jstorResp
+		marshallErr := json.Unmarshal([]byte(respStr), &resp)
+		if marshallErr != nil {
+			log.Printf("Unable to parse response: %s", marshallErr.Error())
+			continue
+		}
+		if resp.Total == 0 {
+			continue
+		}
+		if resp.Total > 1 {
+			unescaped, _ := url.QueryUnescape(filter)
+			log.Printf("Query filter %s returned more than one hit", unescaped)
+			continue
+		}
+		hits++
+		hit := resp.Assets[0]
+		out.Identifiers = append(out.Identifiers, strconv.Itoa(hit.ID))
+		out.Identifiers = append(out.Identifiers, hit.Filename)
+		repURL := fmt.Sprintf("%s/assets/%d/representation/details?_dc=%s", jstorURL, hit.ID, hit.RepresentationID)
+		repRespStr, err := getAPIResponse(repURL, true)
+		if err == nil {
+			var repInfo jstorResource
+			marshallErr = json.Unmarshal([]byte(repRespStr), &repInfo)
+			if marshallErr == nil {
+				out.ServiceURL = append(out.ServiceURL, serviceURL{URL: repInfo.URL, Protocol: "image-download"})
+				out.ServiceURL = append(out.ServiceURL, serviceURL{URL: repInfo.IIIF, Protocol: "iiif-presentation"})
+			}
+		}
+		break
+	}
+	if hits == 0 {
+		c.String(http.StatusNotFound, "%s not found", passedID)
+	} else {
+		c.JSON(http.StatusOK, out)
+	}
+}
+
+func mapToEncodedString(val map[string]string) string {
+	jsonStr, _ := json.Marshal(val)
+	t := &url.URL{Path: string(jsonStr)}
+	encoded := t.String()
+	return encoded[2:len(encoded)]
 }
 
 // getAPIResponse is a helper used to call a JSON endpoint and return the resoponse as a string
-func getAPIResponse(tgtURL string) (string, error) {
-	log.Printf("Get resonse for: %s", tgtURL)
+func getAPIResponse(tgtURL string, retry bool) (string, error) {
+	log.Printf("Get response for: %s", tgtURL)
 	apiReq, _ := http.NewRequest("GET", tgtURL, nil)
 	for _, cookie := range loginCookies {
 		apiReq.AddCookie(cookie)
@@ -130,8 +168,18 @@ func getAPIResponse(tgtURL string) (string, error) {
 		log.Printf("Unable to GET %s: %s", tgtURL, err.Error())
 		return "", err
 	}
-
 	defer resp.Body.Close()
+
+	// Forbidden... maybe cookie expired. RE-auth and try again
+	if resp.StatusCode == 403 {
+		lerr := jstorLogin()
+		if lerr != nil {
+			log.Printf("Unable to GET %s: %s", tgtURL, lerr.Error())
+			return "", lerr
+		}
+		return getAPIResponse(tgtURL, false)
+	}
+
 	bodyBytes, _ := ioutil.ReadAll(resp.Body)
 	respString := string(bodyBytes)
 	if resp.StatusCode != 200 {
