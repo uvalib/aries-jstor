@@ -131,8 +131,12 @@ func ariesLookup(c *gin.Context) {
 			var repInfo jstorResource
 			marshallErr = json.Unmarshal([]byte(repRespStr), &repInfo)
 			if marshallErr == nil {
-				out.ServiceURL = append(out.ServiceURL, serviceURL{URL: repInfo.URL, Protocol: "image-download"})
-				out.ServiceURL = append(out.ServiceURL, serviceURL{URL: repInfo.IIIF, Protocol: "iiif-presentation"})
+				if repInfo.URL != "" {
+					out.ServiceURL = append(out.ServiceURL, serviceURL{URL: repInfo.URL, Protocol: "image-download"})
+				}
+				if repInfo.IIIF != "" {
+					out.ServiceURL = append(out.ServiceURL, serviceURL{URL: repInfo.IIIF, Protocol: "iiif-presentation"})
+				}
 			}
 		}
 		break
