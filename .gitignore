@@ -13,5 +13,6 @@ dist/
 env.*
 /pkg
 run.sh
-*.sh
 example.rb
+buildtag.*
+package/scripts/*.ksh
